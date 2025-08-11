@@ -7180,7 +7180,7 @@ async function openWorldBookEditor(bookId) {
 function createMessageElement(msg, chat) {
     // 【核心修正】这是一个“渲染守卫”，用于阻止系统提示被显示在聊天界面上
 // 它检查消息是否是用户角色，并且内容是否以“[系统提示”开头
-if (msg.role === 'user' && msg.content && msg.content.startsWith('[系统提示')) {
+if (msg.role === 'user' && typeof msg.content === 'string' && msg.content.startsWith('[系统提示')) {
     // 如果是，则不创建任何HTML元素，直接返回null，相当于让它“隐形”
     return null;
 }
