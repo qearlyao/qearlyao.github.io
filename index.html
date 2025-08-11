@@ -5090,11 +5090,11 @@ input:checked + .slider:before {
     <div class="form-group"><label for="member-persona-input">人设</label><textarea id="member-persona-input" rows="4"></textarea></div>
     
     <!-- ▼▼▼ 在这里新增语音ID设置 ▼▼▼ -->
-    <div class="form-group">
-        <label for="member-voice-id-input">成员语音ID (Voice ID)</label>
-        <input type="text" id="member-voice-id-input" placeholder="输入该成员的 Minimax Voice ID">
-    </div>
-    <!-- ▲▲▲ 新增结束 ▲▲▲ -->
+<div class="form-group">
+    <label for="member-voice-id-input">成员语音ID (Voice ID)</label>
+    <input type="text" id="member-voice-id-input" placeholder="输入该成员的 Minimax Voice ID">
+</div>
+<!-- ▲▲▲ 新增结束 ▲▲▲ -->
      
     <div class="form-group"><label>头像</label><div class="avatar-upload"><img id="member-avatar-preview"><button onclick="document.getElementById('member-avatar-input').click()">上传头像</button><button class="change-frame-btn" data-type="member">更换头像框</button><input type="file" id="member-avatar-input" accept="image/*"></div></div>
     </div><div class="modal-footer"><button class="cancel" id="cancel-member-settings-btn">取消</button><button class="save" id="save-member-settings-btn">保存</button></div></div></div>
@@ -6750,6 +6750,9 @@ function parseAiResponse(content) {
     document.getElementById('background-activity-switch').checked = state.globalSettings.enableBackgroundActivity || false;
     document.getElementById('background-interval-input').value = state.globalSettings.backgroundActivityInterval || 60;
     document.getElementById('block-cooldown-input').value = state.globalSettings.blockCooldownHours || 1;
+// ...函数末尾...
+    document.getElementById('minimax-group-id').value = state.apiConfig.minimaxGroupId || '';
+    document.getElementById('minimax-api-key').value = state.apiConfig.minimaxApiKey || '';
 }
         window.renderApiSettingsProxy = renderApiSettings;
 
@@ -7867,6 +7870,7 @@ ${contextSummary || "（无有效对话记录）"}
         const maxMemory = parseInt(chat.settings.maxMemory) || 10;
         const historySlice = chat.history.slice(-maxMemory);
 
+
         // --- ▼▼▼ 全新添加的时间感知代码 ▼▼▼ ---
         let timeContext = `\n- **当前时间**: ${currentTime}`;
         const lastAiMessage = historySlice.filter(m => m.role === 'assistant' && !m.isHidden).slice(-1)[0];
@@ -8133,7 +8137,7 @@ ${sharedContext}
 // ▼▼▼ 请用这【一整块已修复时间戳】的代码，替换旧的【单人聊天】messagesPayload构建逻辑 ▼▼▼
 messagesPayload = historySlice.map(msg => {
     // 过滤掉不应发送给AI的消息
-    if (msg.isHidden) return null;
+    // if (msg.isHidden) return null; // <--- 问题就在这一行！已注释掉以修复BUG
     
     // 1. 如果是AI自己的消息，我们将其转换为AI能理解的JSON字符串格式
     if (msg.role === 'assistant') {
@@ -8240,7 +8244,7 @@ if (visiblePosts.length > 0 && !chat.isGroup) {
             messagesPayload.push({ role: 'system', content: postsContext });
         }
             let  isGemini = proxyUrl === GEMINI_API_URL;
-            let geminiConfig = toGeminiRequestData(model,apiKey,systemPrompt, messagesPayload)
+            let geminiConfig = toGeminiRequestData(model, apiKey, systemPrompt, messagesPayload.filter(m => m.role !== 'system'));
             const response = isGemini ? await fetch(geminiConfig.url, geminiConfig.data) :  await fetch(`${proxyUrl}/v1/chat/completions`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}`},
@@ -8266,6 +8270,43 @@ if (visiblePosts.length > 0 && !chat.isGroup) {
                 throw new Error(errorMsg);
             }
             const data = await response.json();
+            // ▼▼▼ 【全新添加】在这里加入针对 Gemini 安全拦截的健壮性检查 ▼▼▼
+            if (isGemini && !data.candidates) {
+                console.error("Gemini API 返回了不包含 candidates 的响应，可能是因为安全设置拦截了内容。完整响应:", JSON.stringify(data, null, 2));
+                
+                // 从 promptFeedback 中提取更详细的错误原因
+                const blockReason = data.promptFeedback?.blockReason || '未知原因';
+                const errorMessageContent = `[出错了: Gemini API 返回了无效的响应，可能是因为内容被安全策略拦截 (原因: ${blockReason})。请检查您的角色设定或对话上下文。]`;
+                
+                const errorMessage = { 
+                    role: 'assistant', 
+                    content: errorMessageContent, 
+                    timestamp: Date.now() 
+                };
+                if(chat.isGroup) errorMessage.senderName = "系统消息";
+                
+                chat.history.push(errorMessage);
+                await db.chats.put(chat);
+                
+                // 检查用户是否还停留在呼叫界面，如果是，则切换回来并显示错误
+                if (document.getElementById('outgoing-call-screen').classList.contains('active')) {
+                    showScreen('chat-interface-screen');
+                }
+                renderChatInterface(chatId); // 在UI上显示错误
+                
+                // 别忘了重置正在输入的动画
+                if (chatHeaderTitle) {
+                    chatHeaderTitle.textContent = chat.name;
+                    chatHeaderTitle.classList.remove('typing-status');
+                }
+                if (typingIndicator) {
+                    typingIndicator.style.display = 'none';
+                }
+                
+                return; // 提前退出函数，不再执行后续逻辑
+            }
+            // ▲▲▲ 新增代码结束 ▲▲▲
+
             const aiResponseContent = isGemini? data.candidates[0].content.parts[0].text : data.choices[0].message.content;
             console.log(`AI '${chat.name}' 的原始回复:`, aiResponseContent);
 
@@ -10846,12 +10887,12 @@ async function handleInitiateCall() {
     
     // 准备并发送系统消息给AI
     const requestMessage = {
-        role: 'system',
+        role: 'user', // 【核心修正1】角色必须是 'user'，代表这是用户发起的事件
         content: chat.isGroup 
             ? `[系统提示：用户 (${chat.settings.myNickname || '我'}) 发起了群视频通话请求。请你们各自决策，并使用 "group_call_response" 指令，设置 "decision" 为 "join" 或 "decline" 来回应。]`
             : `[系统提示：用户向你发起了视频通话请求。请根据你的人设，使用 "video_call_response" 指令，并设置 "decision" 为 "accept" 或 "reject" 来回应。]`,
         timestamp: Date.now(),
-        isHidden: true,
+        // 【核心修正2】必须移除 isHidden: true。这条消息需要被AI看到。
     };
     chat.history.push(requestMessage);
     await db.chats.put(chat);
@@ -11166,18 +11207,58 @@ ${videoCallState.preCallContext}
     // --- 修复结束 ---
     
         try {
-            let  isGemini = proxyUrl === GEMINI_API_URL;
-            let geminiConfig = toGeminiRequestData(model,apiKey,inCallPrompt, messagesForApi)
+            let isGemini = proxyUrl === GEMINI_API_URL;
+
+            // ▼▼▼ 【最终修复】为通话中的对话构建一个100%符合Gemini API规范的请求 ▼▼▼
+            
+            // 1. systemInstruction 始终是我们的 "inCallPrompt"
+            const systemInstructionForCall = inCallPrompt;
+
+            // 2. contents 始终是我们的通话记录
+            const conversationHistoryForCall = [...videoCallState.callHistory];
+
+            // 3. 【核心】如果通话记录为空（即通话刚开始），我们必须手动添加一个启动回合
+            if (conversationHistoryForCall.length === 0) {
+                const firstTurnContent = videoCallState.initiator === 'user'
+                    ? `*你按下了接听键，视频接通了...*`
+                    : `*对方接听了你的电话，视频接通了...*`;
+                conversationHistoryForCall.push({ role: 'user', content: firstTurnContent });
+            }
+            
+            // 4. 使用我们健壮的 toGeminiRequestData 函数来构建请求
+            let geminiConfig = toGeminiRequestData(model, apiKey, systemInstructionForCall, conversationHistoryForCall);
+            // ▲▲▲ 修复结束 ▲▲▲
+
             const response = isGemini ? await fetch(geminiConfig.url, geminiConfig.data) : await fetch(`${proxyUrl}/v1/chat/completions`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}`},
                 body: JSON.stringify({
-                    model: model, messages: messagesForApi, temperature: 0.8
+                    model: model, 
+                    // OpenAI API 需要将 system prompt 合并到 messages
+                    messages: [{ role: 'system', content: systemInstructionForCall }, ...conversationHistoryForCall], 
+                    temperature: 0.8
                 })
             });
+
             if (!response.ok) throw new Error((await response.json()).error.message);
 
             const data = await response.json();
+
+            // 在这里加入针对 Gemini 安全拦截的健壮性检查
+            if (isGemini && !data.candidates) {
+                console.error("Gemini API 在通话中返回了无效响应，可能是内容被拦截。响应:", JSON.stringify(data, null, 2));
+                const blockReason = data.promptFeedback?.blockReason || '未知安全原因';
+                const errorMessageContent = `[ERROR: Gemini API 拦截了本次回复 (原因: ${blockReason})。请尝试换个话题继续，或结束通话。]`;
+                const errorBubble = document.createElement('div');
+                errorBubble.className = 'call-message-bubble ai-speech';
+                errorBubble.style.color = '#ff8a80';
+                errorBubble.textContent = errorMessageContent;
+                callFeed.appendChild(errorBubble);
+                callFeed.scrollTop = callFeed.scrollHeight;
+                videoCallState.callHistory.push({ role: 'assistant', content: errorMessageContent });
+                return; 
+            }
+
             const aiResponse = isGemini? data.candidates[0].content.parts[0].text : data.choices[0].message.content;
 
             const connectingElement = callFeed.querySelector('em');
@@ -13308,13 +13389,10 @@ document.getElementById('save-wallpaper-btn').addEventListener('click', async ()
     showScreen('home-screen');
 });
 // ▲▲▲ 替换结束 ▲▲▲
-            document.getElementById('save-api-settings-btn').addEventListener('click', async () => {
-                state.apiConfig.proxyUrl = document.getElementById('proxy-url').value.trim();
-                state.apiConfig.apiKey = document.getElementById('api-key').value.trim();
-                state.apiConfig.model = document.getElementById('model-select').value;
-                state.apiConfig.minimaxGroupId = document.getElementById('minimax-group-id').value.trim();
-                state.apiConfig.minimaxApiKey = document.getElementById('minimax-api-key').value.trim();
-                await db.apiConfig.put(state.apiConfig); 
+            document.getElementById('save-api-settings-btn').addEventListener('click', async () => { state.apiConfig.proxyUrl = document.getElementById('proxy-url').value.trim(); state.apiConfig.apiKey = document.getElementById('api-key').value.trim(); state.apiConfig.model = document.getElementById('model-select').value;
+            state.apiConfig.minimaxGroupId = document.getElementById('minimax-group-id').value.trim();
+            state.apiConfig.minimaxApiKey = document.getElementById('minimax-api-key').value.trim();
+            await db.apiConfig.put(state.apiConfig); 
 
 // 在 'save-api-settings-btn' 的 click 事件监听器内部
 // await db.apiConfig.put(state.apiConfig); 这行之后
@@ -13415,12 +13493,16 @@ alert('API设置已保存!'); });
 await db.worldBooks.put(book); document.getElementById('world-book-editor-title').textContent = newName; editingWorldBookId = null; renderWorldBookScreen(); showScreen('world-book-screen'); } });
             document.getElementById('chat-messages').addEventListener('click', (e) => { const aiImage = e.target.closest('.ai-generated-image'); if (aiImage) { const description = aiImage.dataset.description; if (description) showCustomAlert('照片描述', description); return; }
             
-            const voiceMessage = e.target.closest('.voice-message-body');
+  // ▼▼▼ 请用这个【已修复】的 voiceMessage 点击事件逻辑，替换掉你原来的那一段 ▼▼▼
+        const voiceMessage = e.target.closest('.voice-message-body');
             if (voiceMessage) {
-                const text = voiceMessage.dataset.text;
+                // 1. 找到正确的父级元素来获取数据
                 const bubble = voiceMessage.closest('.message-bubble');
                 if (!bubble) return;
-                
+
+                // 【修复1】从正确的 bubble.dataset.voiceText 中获取文本
+                const text = bubble.dataset.voiceText; 
+
                 const timestamp = parseInt(bubble.dataset.timestamp);
                 const chat = state.chats[state.activeChatId];
                 const msg = chat.history.find(m => m.timestamp === timestamp);
@@ -13428,19 +13510,24 @@ await db.worldBooks.put(book); document.getElementById('world-book-editor-title'
 
                 let voiceId;
                 if (chat.isGroup) {
-                    const member = chat.members.find(m => m.name === msg.senderName);
+                    // 【修复2】使用正确的 originalName 来查找群成员
+                    const member = chat.members.find(m => m.originalName === msg.senderName);
                     voiceId = member?.voiceId;
                 } else {
+                    // 单聊逻辑是正确的，保持不变
                     voiceId = chat.settings.voiceId;
                 }
                 
-                if (voiceId) {
+                // 现在 text 和 voiceId 都能被正确获取，语音功能将恢复正常
+                if (voiceId && text) {
                     playTtsAudio(text, voiceId);
                 } else {
-                    showCustomAlert('语音内容', text); // 若未配置Voice ID，则保持原样
+                    showCustomAlert('语音内容', text || '(语音内容为空)');
                 }
                 return;
-            } });
+            }
+// ▲▲▲ 替换结束 ▲▲▲
+});
 
             const chatSettingsModal = document.getElementById('chat-settings-modal');
             const worldBookSelectBox = document.querySelector('.custom-multiselect .select-box');
@@ -13540,47 +13627,21 @@ document.getElementById('chat-settings-btn').addEventListener('click', async () 
     document.getElementById('chat-settings-modal').classList.add('visible');
 });
 // ▲▲▲ 替换结束 ▲▲▲
-            
-function renderGroupMemberSettings(members) { 
-    const container = document.getElementById('group-members-settings'); 
-    container.innerHTML = ''; 
-    members.forEach(member => { 
-        const div = document.createElement('div'); 
-        div.className = 'member-editor'; 
-        div.dataset.memberId = member.id; 
-        // ★★★【核心重构】★★★
-        // 显示的是 groupNickname
-        div.innerHTML = `<img src="${member.avatar}" alt="${member.groupNickname}"><div class="member-name">${member.groupNickname}</div>`; 
-        div.addEventListener('click', () => openMemberEditor(member.id)); 
-        container.appendChild(div); 
-    }); 
-}
 
-function openMemberEditor(memberId) { 
-    editingMemberId = memberId; 
-    const chat = state.chats[state.activeChatId]; 
-    const member = chat.members.find(m => m.id === memberId); 
-    document.getElementById('member-name-input').value = member.groupNickname; 
-    document.getElementById('member-persona-input').value = member.persona; 
-    document.getElementById('member-avatar-preview').src = member.avatar; 
-    document.getElementById('member-settings-modal').classList.add('visible'); 
-}
+            function renderGroupMemberSettings(members) { const container = document.getElementById('group-members-settings'); container.innerHTML = ''; members.forEach(member => { const div = document.createElement('div'); div.className = 'member-editor'; div.dataset.memberId = member.id; div.innerHTML = `<img src="${member.avatar}" alt="${member.groupNickname}"><div class="member-name">${member.groupNickname}</div>`; div.addEventListener('click', () => openMemberEditor(member.id)); container.appendChild(div); }); }
+            function openMemberEditor(memberId) { editingMemberId = memberId; const chat = state.chats[state.activeChatId]; const member = chat.members.find(m => m.id === memberId); document.getElementById('member-name-input').value = member.groupNickname; document.getElementById('member-persona-input').value = member.persona; document.getElementById('member-avatar-preview').src = member.avatar; document.getElementById('member-settings-modal').classList.add('visible'); }
+        
             document.getElementById('cancel-member-settings-btn').addEventListener('click', () => { document.getElementById('member-settings-modal').classList.remove('visible'); editingMemberId = null; });
-            document.getElementById('save-member-settings-btn').addEventListener('click', () => { 
-    if (!editingMemberId) return; 
-    const chat = state.chats[state.activeChatId]; 
-    const member = chat.members.find(m => m.id === editingMemberId); 
-    
-    // ★★★【核心重构】★★★
-    const newNickname = document.getElementById('member-name-input').value.trim();
-    if (!newNickname) {
-        alert("群昵称不能为空！");
-        return;
-    }
-    member.groupNickname = newNickname; // 只修改群昵称
-    member.persona = document.getElementById('member-persona-input').value; 
-    member.avatar = document.getElementById('member-avatar-preview').src; 
-    
+            document.getElementById('save-member-settings-btn').addEventListener('click', () => { if (!editingMemberId) return; const chat = state.chats[state.activeChatId]; const member = chat.members.find(m => m.id === editingMemberId); const newNickname = document.getElementById('member-name-input').value.trim(); if (!newNickname) { alert("群昵称不能为空！"); return; }
+            
+            member.groupNickname = newNickname; // 只修改群昵称
+            member.persona = document.getElementById('member-persona-input').value; 
+            member.avatar = document.getElementById('member-avatar-preview').src; 
+
+            // ▼▼▼ 在这里新增 ▼▼▼
+            member.voiceId = document.getElementById('member-voice-id-input').value.trim();
+            // ▲▲▲ 新增结束 ▲▲▲
+
     renderGroupMemberSettings(chat.members); 
     document.getElementById('member-settings-modal').classList.remove('visible'); 
 });
